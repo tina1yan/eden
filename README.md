@@ -1,3 +1,5 @@
+> **Personal experimental fork: audio shutdown fix.** This branch contains the validated v0.2.1-based fix. It is AI-assisted and is not an official Eden release. See [validation and upstream review status](docs/audio-shutdown-fix.md).
+
 <!--
 # SPDX-FileCopyrightText: Copyright 2025 Eden Emulator Project
 # SPDX-License-Identifier: GPL-3.0-or-later
