@@ -237,6 +237,9 @@ protected:
     std::string name{};
 
 private:
+    /// Publish a buffer and samples together, or abandon them when the system is shutting down.
+    void QueueBuffer(SinkBuffer& buffer, std::span<const s16> samples);
+
     /// Ring buffer of the samples waiting to be played or consumed
     Common::RingBuffer<s16, 0x10000> samples_buffer;
     /// Audio buffers queued and waiting to play
