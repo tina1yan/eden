@@ -23,7 +23,7 @@
 namespace AudioCore::Sink {
 
 void SinkStream::AppendBuffer(SinkBuffer& buffer, std::span<s16> samples) {
-    if (type == StreamType::In)
+    if (type == StreamType::In || system.IsShuttingDown())
         return;
 
     constexpr s32 min = (std::numeric_limits<s16>::min)();
@@ -57,27 +57,36 @@ void SinkStream::AppendBuffer(SinkBuffer& buffer, std::span<s16> samples) {
             samples[w_offs + 1] = s16(std::clamp(s32(right * volume), min, max));
         }
 
-        queue.EmplaceWait(buffer);
-        samples_buffer.Push(samples.subspan(0, samples.size() / system_channels * device_channels));
+        QueueBuffer(buffer, samples.subspan(0, samples.size() / system_channels * device_channels));
     } else if (system_channels < device_channels) {
         std::vector<s16> new_samples(samples.size() / system_channels * device_channels);
         for (u32 r_offs = 0, w_offs = 0; r_offs < samples.size(); r_offs += system_channels, w_offs += device_channels)
             for (u32 channel = 0; channel < system_channels; ++channel)
                 new_samples[w_offs + channel] = s16(std::clamp(s32(f32(samples[r_offs + channel]) * volume), min, max));
 
-        queue.EmplaceWait(buffer);
-        samples_buffer.Push(new_samples);
+        QueueBuffer(buffer, new_samples);
     } else {
         if (volume != 1.0f) {
             for (u32 i = 0; i < samples.size(); ++i)
                 samples[i] = s16(std::clamp(s32(f32(samples[i]) * volume), min, max));
         }
 
-        queue.EmplaceWait(buffer);
-        samples_buffer.Push(samples);
+        QueueBuffer(buffer, samples);
     }
 
-    ++queued_buffers;
+}
+
+void SinkStream::QueueBuffer(SinkBuffer& buffer, std::span<const s16> samples) {
+    std::unique_lock lk{release_mutex};
+    while (!system.IsShuttingDown()) {
+        if (queue.TryEmplace(buffer)) {
+            samples_buffer.Push(samples);
+            ++queued_buffers;
+            return;
+        }
+        // The device may have stopped calling back, so shutdown must not depend on a notify.
+        release_cv.wait_for(lk, std::chrono::milliseconds(7));
+    }
 }
 
 std::vector<s16> SinkStream::ReleaseBuffer(u64 num_samples) {
@@ -174,8 +183,7 @@ void SinkStream::ProcessAudioOutAndRender(std::span<s16> output_buffer, std::siz
     if (system.IsPaused() || system.IsShuttingDown()) {
         if (system.IsShuttingDown()) {
             std::scoped_lock lk{release_mutex};
-            queued_buffers.store(0);
-            release_cv.notify_one();
+            release_cv.notify_all();
         }
         for (size_t i = 0; i < num_frames; i++)
             std::memset(&output_buffer[i * frame_size], 0, frame_size_bytes);
@@ -235,13 +243,15 @@ void SinkStream::WaitFreeSpace(std::stop_token stop_token) {
     std::unique_lock lk{release_mutex};
 
     auto can_continue = [this]() {
-        return paused || queued_buffers < max_queue_size;
+        return system.IsShuttingDown() || paused || queued_buffers < max_queue_size;
     };
 
     release_cv.wait_for(lk, std::chrono::milliseconds(7), can_continue);
 
     if (queued_buffers > max_queue_size + 3) {
-        release_cv.wait(lk, stop_token, can_continue);
+        while (!stop_token.stop_requested() && !can_continue()) {
+            release_cv.wait_for(lk, stop_token, std::chrono::milliseconds(7), can_continue);
+        }
     }
 }
 
